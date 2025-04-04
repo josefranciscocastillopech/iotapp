@@ -11,7 +11,6 @@ const LoginForm: React.FC = () => {
     const [password, setPassword] = useState("")
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const [verificationSent, setVerificationSent] = useState(false)
     const { user, setUser } = useAuth()
     const navigate = useNavigate()
     const location = useLocation()
@@ -24,32 +23,12 @@ const LoginForm: React.FC = () => {
         }
     }, [user, navigate])
 
-    const sendVerificationEmail = async (userEmail: string) => {
-        try {
-            const { error } = await supabase.auth.resend({
-                type: "signup",
-                email: userEmail,
-                options: {
-                    emailRedirectTo: `${window.location.origin}/verify-email`,
-                },
-            })
-
-            if (error) throw error
-
-            setVerificationSent(true)
-            return true
-        } catch (err: any) {
-            console.error("Error sending verification email:", err)
-            setError(`Error al enviar email de verificación: ${err.message}`)
-            return false
-        }
-    }
+    // Modificar la función handleLogin para asegurar que la sesión se guarde correctamente
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault()
         setLoading(true)
         setError(null)
-        setVerificationSent(false)
 
         try {
             console.log("Attempting login for:", email)
@@ -67,43 +46,39 @@ const LoginForm: React.FC = () => {
             if (data.user) {
                 console.log("Login successful for:", data.user.email)
 
-                // Check if email is verified from user metadata
-                const isEmailVerified =
-                    data.user.email_confirmed_at || (data.user.user_metadata && data.user.user_metadata.email_verified === true)
-
-                if (!isEmailVerified) {
-                    console.log("Email not verified, sending verification email")
-                    // Sign out the user since they need to verify email first
+                // Check if email is verified
+                if (!data.user.email_confirmed_at) {
+                    setError("Por favor verifica tu correo electrónico antes de iniciar sesión.")
                     await supabase.auth.signOut()
-
-                    // Send verification email
-                    await sendVerificationEmail(email)
-
                     setLoading(false)
                     return
                 }
 
-                // Try to get user profile, but don't fail if it doesn't exist
-                let profileData = null
-                try {
-                    const { data: profile, error: profileError } = await supabase
-                        .from("user_profiles")
-                        .select("*")
-                        .eq("user_id", data.user.id)
-                        .single()
+                // Get user profile
+                const { data: profileData, error: profileError } = await supabase
+                    .from("user_profiles")
+                    .select("*")
+                    .eq("user_id", data.user.id)
+                    .single()
 
-                    if (!profileError) {
-                        profileData = profile
-                    }
-                } catch (profileErr) {
-                    console.warn("Could not fetch profile, but continuing with auth user:", profileErr)
+                if (profileError && profileError.code !== "PGRST116") {
+                    console.error("Error fetching user profile:", profileError)
                 }
 
-                // Set user in context with profile data if available
+                // Set user in context
                 setUser({
                     ...data.user,
-                    profile: profileData,
+                    profile: profileData || null,
                 })
+
+                // Guardar explícitamente la sesión en localStorage como respaldo
+                try {
+                    if (data.session) {
+                        localStorage.setItem("supabase.auth.token", JSON.stringify(data.session))
+                    }
+                } catch (storageError) {
+                    console.error("Error saving session to localStorage:", storageError)
+                }
 
                 // Redirect to dashboard
                 console.log("Redirecting to dashboard after successful login")
@@ -121,12 +96,6 @@ const LoginForm: React.FC = () => {
         <div className="auth-form-container">
             <h2>Iniciar Sesión</h2>
             {error && <div className="auth-error">{error}</div>}
-            {verificationSent && (
-                <div className="auth-success">
-                    Se ha enviado un enlace de verificación a tu correo electrónico. Por favor verifica tu cuenta antes de iniciar
-                    sesión.
-                </div>
-            )}
             <form onSubmit={handleLogin} className="auth-form">
                 <div className="form-group">
                     <label htmlFor="email">Correo Electrónico</label>
@@ -153,19 +122,6 @@ const LoginForm: React.FC = () => {
                 <p>
                     <a href="/forgot-password">¿Olvidaste tu contraseña?</a>
                 </p>
-                {!verificationSent && (
-                    <p>
-                        <a
-                            href="#"
-                            onClick={(e) => {
-                                e.preventDefault()
-                                sendVerificationEmail(email)
-                            }}
-                        >
-                            Reenviar email de verificación
-                        </a>
-                    </p>
-                )}
             </div>
         </div>
     )

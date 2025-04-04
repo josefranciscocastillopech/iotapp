@@ -101,8 +101,51 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           }
         } else {
           console.log("No active session found")
-          setSession(null)
-          setUser(null)
+
+          // Intentar recuperar la sesión desde localStorage como respaldo
+          try {
+            const storedSession = localStorage.getItem("supabase.auth.token")
+            if (storedSession) {
+              console.log("Found stored session in localStorage, attempting to restore...")
+              // La sesión existe en localStorage, intentar restaurarla
+              const { data, error } = await supabase.auth.refreshSession()
+
+              if (error) {
+                console.error("Error refreshing session:", error)
+                // Limpiar localStorage si hay error
+                localStorage.removeItem("supabase.auth.token")
+                setSession(null)
+                setUser(null)
+              } else if (data.session) {
+                console.log("Session restored successfully")
+                setSession(data.session)
+
+                if (data.user) {
+                  setUser({
+                    ...data.user,
+                    profile: null,
+                  })
+
+                  // Fetch profile in background
+                  fetchUserProfile(data.user.id).then((profile) => {
+                    if (profile) {
+                      setUser((prevUser) => ({
+                        ...prevUser!,
+                        profile,
+                      }))
+                    }
+                  })
+                }
+              }
+            } else {
+              setSession(null)
+              setUser(null)
+            }
+          } catch (storageError) {
+            console.error("Error accessing localStorage:", storageError)
+            setSession(null)
+            setUser(null)
+          }
         }
       } catch (err) {
         console.error("Error initializing auth:", err)

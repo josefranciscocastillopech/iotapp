@@ -15,9 +15,9 @@ import {
     Legend,
     Filler,
 } from "chart.js"
-import { Line } from "react-chartjs-2"
-import type { HistoricoSensor, ChartData, DatosClima } from "../types/types"
-import { fetchHistoricalSensorData, fetchClimateData } from "../services/dataService"
+import { Line, Bar } from "react-chartjs-2"
+import type { HistoricoSensor, ChartData, DatosClima, PlotInformation } from "../types/types"
+import { fetchHistoricalSensorData, fetchClimateData, fetchActivePlots } from "../services/dataService"
 
 // Register ChartJS components
 ChartJS.register(
@@ -36,6 +36,7 @@ ChartJS.register(
 const HistoricalCharts: React.FC = () => {
     const [sensorData, setSensorData] = useState<HistoricoSensor[]>([])
     const [climateData, setClimateData] = useState<DatosClima[]>([])
+    const [activePlots, setActivePlots] = useState<PlotInformation[]>([])
     const [loading, setLoading] = useState<boolean>(true)
     const [error, setError] = useState<string | null>(null)
 
@@ -45,14 +46,20 @@ const HistoricalCharts: React.FC = () => {
                 setLoading(true)
                 console.log("Fetching historical data for charts...")
 
-                // Fetch both sensor and climate data in parallel
-                const [sensorHistory, climateHistory] = await Promise.all([fetchHistoricalSensorData(), fetchClimateData()])
+                // Fetch all data types in parallel
+                const [sensorHistory, climateHistory, plotsData] = await Promise.all([
+                    fetchHistoricalSensorData(),
+                    fetchClimateData(),
+                    fetchActivePlots(),
+                ])
 
                 console.log("Historical sensor data received:", sensorHistory)
                 console.log("Historical climate data received:", climateHistory)
+                console.log("Active plots data received:", plotsData)
 
-                setSensorData(sensorHistory)
-                setClimateData(climateHistory)
+                setSensorData(sensorHistory || [])
+                setClimateData(climateHistory || [])
+                setActivePlots(plotsData || [])
             } catch (err) {
                 console.error("Error fetching historical data:", err)
                 setError("Error loading historical data")
@@ -80,13 +87,13 @@ const HistoricalCharts: React.FC = () => {
     const processDataForCharts = (): {
         humidityChartData: ChartData
         temperatureChartData: ChartData
-        otherDataChartData: ChartData
+        combinedChartData: ChartData
     } => {
         console.log("Processing chart data...")
 
         // 1. Humidity Chart (from historico_sensores)
         // Filter humidity data
-        const humidityData = sensorData.filter((item) => item.tipo === "humedad" || !item.tipo)
+        const humidityData = sensorData.filter((item) => item.tipo === "humedad")
 
         // Get the last 20 records or all if less than 20
         const recentHumidityData = humidityData.slice(-20)
@@ -101,11 +108,22 @@ const HistoricalCharts: React.FC = () => {
         const humidityValues = recentHumidityData.map((item) => item.valor)
 
         // Group by parcela_id
-        const parcelaGroups: { [key: number]: { values: number[]; labels: string[] } } = {}
+        const parcelaGroups: { [key: number]: { values: number[]; labels: string[]; name: string } } = {}
 
         recentHumidityData.forEach((item) => {
             if (!parcelaGroups[item.parcela_id]) {
-                parcelaGroups[item.parcela_id] = { values: [], labels: [] }
+                // Find plot name if available
+                let plotName = `Parcela ${item.parcela_id}`
+                const plot = activePlots.find((p) => p.id === item.parcela_id)
+                if (plot) {
+                    plotName = plot.nombre
+                }
+
+                parcelaGroups[item.parcela_id] = {
+                    values: [],
+                    labels: [],
+                    name: plotName,
+                }
             }
 
             const date = new Date(item.timestamp)
@@ -126,7 +144,7 @@ const HistoricalCharts: React.FC = () => {
             ]
 
             return {
-                label: `Parcela ${parcelaId}`,
+                label: parcelaGroups[Number(parcelaId)].name,
                 data: parcelaGroups[Number(parcelaId)].values,
                 borderColor: colors[index % colors.length].replace("0.5", "1"),
                 backgroundColor: colors[index % colors.length],
@@ -168,11 +186,22 @@ const HistoricalCharts: React.FC = () => {
         const temperatureValues = recentTemperatureData.map((item) => item.valor)
 
         // Group by parcela_id for temperature
-        const temperatureParcelaGroups: { [key: number]: { values: number[]; labels: string[] } } = {}
+        const temperatureParcelaGroups: { [key: number]: { values: number[]; labels: string[]; name: string } } = {}
 
         recentTemperatureData.forEach((item) => {
             if (!temperatureParcelaGroups[item.parcela_id]) {
-                temperatureParcelaGroups[item.parcela_id] = { values: [], labels: [] }
+                // Find plot name if available
+                let plotName = `Parcela ${item.parcela_id}`
+                const plot = activePlots.find((p) => p.id === item.parcela_id)
+                if (plot) {
+                    plotName = plot.nombre
+                }
+
+                temperatureParcelaGroups[item.parcela_id] = {
+                    values: [],
+                    labels: [],
+                    name: plotName,
+                }
             }
 
             const date = new Date(item.timestamp)
@@ -193,7 +222,7 @@ const HistoricalCharts: React.FC = () => {
             ]
 
             return {
-                label: `Parcela ${parcelaId}`,
+                label: temperatureParcelaGroups[Number(parcelaId)].name,
                 data: temperatureParcelaGroups[Number(parcelaId)].values,
                 borderColor: colors[index % colors.length].replace("0.5", "1"),
                 backgroundColor: colors[index % colors.length],
@@ -218,7 +247,8 @@ const HistoricalCharts: React.FC = () => {
                     ],
         }
 
-        // 3. Other Data Chart (from datos_clima)
+        // 3. Combined Chart (temperatura y humedad)
+        // Get the last 20 records of climate data
         const recentClimateData = climateData.slice(-20)
 
         const climateLabels = recentClimateData.map((item) => {
@@ -226,31 +256,31 @@ const HistoricalCharts: React.FC = () => {
             return `${date.getDate()}/${date.getMonth() + 1} ${date.getHours()}:${date.getMinutes()}`
         })
 
-        // Create datasets for lluvia and sol
-        const otherDataChartData: ChartData = {
+        // Create datasets for temperatura and humedad
+        const combinedChartData: ChartData = {
             labels: climateLabels,
             datasets: [
                 {
-                    label: "Lluvia",
-                    data: recentClimateData.map((item) => item.lluvia || 0),
-                    borderColor: "rgb(75, 192, 192)",
-                    backgroundColor: "rgba(75, 192, 192, 0.5)",
+                    label: "Temperatura (°C)",
+                    data: recentClimateData.map((item) => item.temperatura),
+                    borderColor: "rgb(255, 99, 132)",
+                    backgroundColor: "rgba(255, 99, 132, 0.5)",
                     tension: 0.3,
                 },
                 {
-                    label: "Intensidad del Sol (%)",
-                    data: recentClimateData.map((item) => item.sol || 0),
-                    borderColor: "rgb(255, 206, 86)",
-                    backgroundColor: "rgba(255, 206, 86, 0.5)",
+                    label: "Humedad (%)",
+                    data: recentClimateData.map((item) => item.humedad),
+                    borderColor: "rgb(53, 162, 235)",
+                    backgroundColor: "rgba(53, 162, 235, 0.5)",
                     tension: 0.3,
                 },
             ],
         }
 
-        return { humidityChartData, temperatureChartData, otherDataChartData }
+        return { humidityChartData, temperatureChartData, combinedChartData }
     }
 
-    const { humidityChartData, temperatureChartData, otherDataChartData } = processDataForCharts()
+    const { temperatureChartData, humidityChartData, combinedChartData } = processDataForCharts()
 
     return (
         <div className="charts-container">
@@ -355,10 +385,10 @@ const HistoricalCharts: React.FC = () => {
             </div>
 
             <div className="chart-wrapper">
-                <h3>Otros Datos Climáticos (Últimas 20 Mediciones)</h3>
+                <h3>Temperatura y Humedad Combinadas</h3>
                 <div className="chart">
-                    <Line
-                        data={otherDataChartData}
+                    <Bar
+                        data={combinedChartData}
                         options={{
                             responsive: true,
                             plugins: {
@@ -373,7 +403,7 @@ const HistoricalCharts: React.FC = () => {
                                 },
                                 title: {
                                     display: true,
-                                    text: "Lluvia e Intensidad del Sol",
+                                    text: "Comparativa de Temperatura y Humedad",
                                     color: "black",
                                     font: {
                                         weight: "bold",
@@ -382,7 +412,7 @@ const HistoricalCharts: React.FC = () => {
                             },
                             scales: {
                                 y: {
-                                    beginAtZero: true,
+                                    beginAtZero: false,
                                     ticks: {
                                         color: "black",
                                     },

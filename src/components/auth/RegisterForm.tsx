@@ -45,14 +45,13 @@ const RegisterForm: React.FC = () => {
         }
 
         try {
-            // Register user with Supabase Auth only
+            // Register user with Supabase Auth
             const { data, error } = await supabase.auth.signUp({
                 email,
                 password,
                 options: {
                     data: {
                         name,
-                        email_verified: false, // Explicitly set to false
                     },
                     emailRedirectTo: `${window.location.origin}/verify-email`,
                 },
@@ -61,21 +60,31 @@ const RegisterForm: React.FC = () => {
             if (error) throw error
 
             if (data.user) {
+                // Create user profile
+                const { error: profileError } = await supabase.from("user_profiles").insert([
+                    {
+                        user_id: data.user.id,
+                        name,
+                        email,
+                        created_at: new Date().toISOString(),
+                    },
+                ])
+
+                if (profileError) throw profileError
+
                 // Show success message
-                setSuccess(
-                    "Registro exitoso. Por favor verifica tu correo electrónico para activar tu cuenta. Se ha enviado un enlace de verificación a tu correo.",
-                )
+                setSuccess("Registro exitoso. Por favor verifica tu correo electrónico para activar tu cuenta.")
 
                 // Sign out the user since they need to verify email
                 await supabase.auth.signOut()
 
-                // Redirect to login after 5 seconds
+                // Redirect to login after 3 seconds
                 setTimeout(() => {
                     navigate("/login")
-                }, 5000)
+                }, 3000)
             }
         } catch (err: any) {
-            console.error("Error durante el registro:", err)
+            console.error("Error during registration:", err)
             setError(err.message || "Error al registrarse. Inténtalo de nuevo.")
         } finally {
             setLoading(false)

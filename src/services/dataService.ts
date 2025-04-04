@@ -1,38 +1,249 @@
-import { supabase } from "../utils/supabaseClient"
-import type {
-    ApiResponse,
-    DatabaseTables,
-    Location,
-    HistoricoSensor,
-    PlotInformation,
-    Parcela,
-    DeletedParcela,
-} from "../types/types"
+import { createClient } from "@supabase/supabase-js"
+import type { ApiResponse, HistoricoSensor, DeletedParcela, DatosClima, PlotInformation } from "../types/types"
 
-// Add a timeout to the API fetch
+// Asegúrate de que estas variables de entorno estén configuradas correctamente
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || ""
+const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY || ""
+
+// Verificar que las credenciales estén disponibles
+if (!supabaseUrl || !supabaseAnonKey) {
+    console.error(
+        "Error: Faltan las credenciales de Supabase. Asegúrate de que REACT_APP_SUPABASE_URL y REACT_APP_SUPABASE_ANON_KEY estén configuradas.",
+    )
+}
+
+// Configurar opciones para persistencia de sesión
+const supabaseOptions = {
+    auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        localStorage: typeof window !== "undefined" ? window.localStorage : undefined,
+    },
+}
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, supabaseOptions)
+
+// Función de utilidad para verificar la conexión
+export const checkSupabaseConnection = async () => {
+    try {
+        // Intenta hacer una consulta simple para verificar la conexión
+        const { data, error } = await supabase.from("ubicaciones").select("count", { count: "exact" }).limit(1)
+
+        if (error) {
+            console.error("Error de conexión a Supabase:", error)
+            return false
+        }
+
+        console.log("Conexión a Supabase establecida correctamente")
+        return true
+    } catch (err) {
+        console.error("Error al verificar la conexión a Supabase:", err)
+        return false
+    }
+}
+
+// Función para guardar datos de la API en Supabase
+const saveApiDataToSupabase = async (data: ApiResponse) => {
+    try {
+        // Verificar conexión a Supabase
+        const isConnected = await checkSupabaseConnection()
+        if (!isConnected) {
+            console.error("No se pudo guardar datos en Supabase: sin conexión")
+            return
+        }
+
+        // Guardar datos del clima
+        const { error: climateError } = await supabase.from("datos_clima").insert([
+            {
+                temperatura: data.sensores.temperatura,
+                humedad: data.sensores.humedad,
+                lluvia: data.sensores.lluvia,
+                sol: data.sensores.sol,
+                fecha_creacion: new Date().toISOString(),
+                id_ubicacion: 1, // ID por defecto para ubicación
+            },
+        ])
+
+        if (climateError) {
+            console.error("Error al guardar datos del clima:", climateError)
+        } else {
+            console.log("Datos del clima guardados correctamente")
+        }
+
+        // Guardar datos de sensores para cada parcela
+        for (const parcela of data.parcelas) {
+            // Guardar datos de temperatura
+            const { error: tempError } = await supabase.from("historico_sensores").insert([
+                {
+                    parcela_id: parcela.id,
+                    sensor_id: 1, // ID por defecto para sensor de temperatura
+                    tipo: "temperatura",
+                    valor: parcela.sensor.temperatura,
+                    timestamp: new Date().toISOString(),
+                },
+            ])
+
+            if (tempError) {
+                console.error(`Error al guardar datos de temperatura para parcela ${parcela.id}:`, tempError)
+            }
+
+            // Guardar datos de humedad
+            const { error: humError } = await supabase.from("historico_sensores").insert([
+                {
+                    parcela_id: parcela.id,
+                    sensor_id: 2, // ID por defecto para sensor de humedad
+                    tipo: "humedad",
+                    valor: parcela.sensor.humedad,
+                    timestamp: new Date().toISOString(),
+                },
+            ])
+
+            if (humError) {
+                console.error(`Error al guardar datos de humedad para parcela ${parcela.id}:`, humError)
+            }
+        }
+
+        console.log("Datos de sensores guardados correctamente")
+
+        // Detectar parcelas eliminadas
+        try {
+            // Obtener IDs de parcelas activas
+            const activeParcelIds = data.parcelas.map((p) => p.id)
+
+            // Obtener todas las parcelas de la base de datos
+            const { data: dbParcelas, error: dbError } = await supabase.from("parcelas").select("id")
+
+            if (dbError) {
+                console.error("Error al obtener parcelas de la base de datos:", dbError)
+                return
+            }
+
+            // Encontrar parcelas que están en la base de datos pero no en la API (eliminadas)
+            if (dbParcelas && Array.isArray(dbParcelas)) {
+                const dbParcelIds = dbParcelas.map((p) => p.id)
+                const deletedParcelIds = dbParcelIds.filter((id) => !activeParcelIds.includes(id))
+
+                // Procesar parcelas eliminadas
+                for (const deletedId of deletedParcelIds) {
+                    // Obtener datos de la parcela eliminada
+                    const { data: deletedParcel, error: getError } = await supabase
+                        .from("parcelas")
+                        .select("*")
+                        .eq("id", deletedId)
+                        .single()
+
+                    if (getError) {
+                        console.error(`Error al obtener datos de parcela eliminada ${deletedId}:`, getError)
+                        continue
+                    }
+
+                    if (deletedParcel) {
+                        // Guardar en parcelas_eliminadas
+                        const { error: saveError } = await supabase.from("parcelas_eliminadas").insert([
+                            {
+                                id: deletedParcel.id,
+                                nombre: deletedParcel.nombre,
+                                ubicacion: deletedParcel.ubicacion,
+                                responsable: deletedParcel.responsable,
+                                tipo_cultivo: deletedParcel.tipo_cultivo,
+                                ultimo_riego: deletedParcel.ultimo_riego,
+                                fecha_eliminacion: new Date().toISOString(),
+                                sensor_data: JSON.stringify({
+                                    temperatura: deletedParcel.temperatura,
+                                    humedad: deletedParcel.humedad,
+                                }),
+                            },
+                        ])
+
+                        if (saveError) {
+                            console.error(`Error al guardar parcela eliminada ${deletedId}:`, saveError)
+                        } else {
+                            console.log(`Parcela eliminada ${deletedId} guardada correctamente`)
+
+                            // Eliminar de la tabla de parcelas
+                            const { error: deleteError } = await supabase.from("parcelas").delete().eq("id", deletedId)
+
+                            if (deleteError) {
+                                console.error(`Error al eliminar parcela ${deletedId} de la tabla de parcelas:`, deleteError)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Error al procesar parcelas eliminadas:", err)
+        }
+    } catch (err) {
+        console.error("Error general al guardar datos en Supabase:", err)
+    }
+}
+
+// Función para obtener datos de la API
 export const fetchApiData = async (): Promise<ApiResponse> => {
     try {
-        console.log("Fetching API data from updated endpoint...")
+        console.log("Fetching API data from endpoint (one-time load)...", new Date().toLocaleTimeString())
 
-        // Create a promise that rejects after 5 seconds
+        // Create a promise that rejects after 10 seconds
         const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error("API request timed out")), 5000)
+            setTimeout(() => reject(new Error("API request timed out after 10 seconds")), 10000)
         })
 
         // Race the fetch against the timeout
-        const response = (await Promise.race([fetch("https://moriahmkt.com/iotapp/updated/"), timeoutPromise])) as Response
+        const apiUrl = "https://moriahmkt.com/iotapp/updated/"
+        console.log("Fetching data from API URL:", apiUrl)
+        const response = (await Promise.race([fetch(apiUrl), timeoutPromise])) as Response
 
         if (!response.ok) {
-            throw new Error("Network response was not ok")
+            throw new Error(`Network response was not ok: ${response.status} ${response.statusText}`)
         }
 
         const data = await response.json()
-        console.log("API data fetched successfully:", data)
+        console.log("API data fetched successfully (one-time load) at", new Date().toLocaleTimeString())
+
+        // Log the number of parcels received from API
+        if (data && data.parcelas) {
+            console.log(`Received ${Array.isArray(data.parcelas) ? data.parcelas.length : 0} parcels from API`)
+        }
+
+        // Verificar que los datos tengan la estructura esperada
+        if (!data || !data.sensores || typeof data.sensores !== "object") {
+            console.error("API data has invalid structure:", data)
+            throw new Error("API data has invalid structure")
+        }
+
+        // Asegurarse de que sensores tenga todas las propiedades necesarias
+        const sensores = {
+            temperatura: data.sensores.temperatura || 0,
+            humedad: data.sensores.humedad || 0,
+            lluvia: data.sensores.lluvia || 0,
+            sol: data.sensores.sol || 0,
+        }
+
+        // Asegurarse de que parcelas sea un array
+        const parcelasData = Array.isArray(data.parcelas) ? data.parcelas : []
+
+        // Crear una respuesta normalizada con tipado correcto
+        const normalizedResponse: ApiResponse = {
+            sensores,
+            parcelas: parcelasData.map((p: any) => ({
+                id: p.id || Math.floor(Math.random() * 10000),
+                nombre: p.nombre || `Parcela ${Math.floor(Math.random() * 1000)}`,
+                ubicacion: p.ubicacion || "Ubicación desconocida",
+                responsable: p.responsable || "Sin responsable",
+                tipo_cultivo: p.tipo_cultivo || "Sin especificar",
+                ultimo_riego: p.ultimo_riego || new Date().toISOString(),
+                sensor: {
+                    temperatura: p.sensor?.temperatura !== undefined ? p.sensor.temperatura : 0,
+                    humedad: p.sensor?.humedad !== undefined ? p.sensor.humedad : 0,
+                },
+            })),
+        }
 
         // Automatically save the data to Supabase
-        await saveApiDataToSupabase(data)
+        await saveApiDataToSupabase(normalizedResponse)
 
-        return data
+        return normalizedResponse
     } catch (error) {
         console.error("Error fetching API data:", error)
         // Return default data structure to prevent app from crashing
@@ -61,597 +272,51 @@ export const fetchApiData = async (): Promise<ApiResponse> => {
     }
 }
 
-// Fetch locations from Supabase
-export const fetchLocations = async (): Promise<Location[]> => {
+// Función para obtener datos históricos de sensores
+export const fetchHistoricalSensorData = async (): Promise<HistoricoSensor[]> => {
     try {
-        console.log("Fetching locations...")
-        const { data, error } = await supabase.from("ubicaciones").select("*")
+        console.log("Fetching historical sensor data...")
+        const { data, error } = await supabase
+            .from("historico_sensores")
+            .select("*, informacion:parcela_id(nombre, id_ubicacion, ubicaciones:id_ubicacion(nombre))")
+            .order("timestamp", { ascending: false })
+            .limit(100)
 
         if (error) {
-            console.error("Supabase error fetching locations:", error)
+            console.error("Error fetching historical sensor data:", error)
             throw error
         }
 
-        console.log("Locations fetched successfully:", data)
         return data || []
-    } catch (error) {
-        console.error("Error fetching locations:", error)
+    } catch (err) {
+        console.error("Error in fetchHistoricalSensorData:", err)
         return []
     }
 }
 
-// Enhanced function to save API data to Supabase
-export const saveApiDataToSupabase = async (apiResponse: ApiResponse) => {
-    try {
-        console.log("Saving API data to Supabase...")
-
-        // 1. Check if any deleted plots have reappeared in the API
-        await checkForReappearedPlots(apiResponse.parcelas)
-
-        // 2. Save climate data (sensores)
-        const { sensores } = apiResponse
-
-        // Get or create a default location
-        let locationId = 1 // Default location ID
-
-        const { data: locationData, error: locationError } = await supabase
-            .from("ubicaciones")
-            .select("id")
-            .limit(1)
-            .single()
-
-        if (locationError) {
-            console.log("No existing location found, creating default location")
-            const { data: newLocation, error: createLocationError } = await supabase
-                .from("ubicaciones")
-                .insert([
-                    {
-                        nombre: "Zona Sur",
-                        latitud: 21.0367,
-                        longitud: -86.8742,
-                    },
-                ])
-                .select("id")
-                .single()
-
-            if (createLocationError) {
-                console.error("Error creating default location:", createLocationError)
-            } else if (newLocation) {
-                locationId = newLocation.id
-                console.log("Created default location with ID:", locationId)
-            }
-        } else if (locationData) {
-            locationId = locationData.id
-        }
-
-        // Save ALL climate data including temperatura, humedad, lluvia, and sol
-        const { error: climateError } = await supabase.from("datos_clima").insert([
-            {
-                temperatura: sensores.temperatura,
-                humedad: sensores.humedad,
-                lluvia: sensores.lluvia || 0,
-                sol: sensores.sol || 0,
-                fecha_creacion: new Date().toISOString(),
-                id_ubicacion: locationId,
-            },
-        ])
-
-        if (climateError) {
-            console.error("Supabase error saving climate data:", climateError)
-        } else {
-            console.log("Climate data saved successfully.")
-        }
-
-        // 3. Save plots information
-        for (const parcela of apiResponse.parcelas) {
-            // Check if the plot already exists
-            const { data: existingPlot, error: checkError } = await supabase
-                .from("informacion")
-                .select("id")
-                .eq("id", parcela.id)
-                .single()
-
-            if (checkError && checkError.code !== "PGRST116") {
-                console.error(`Error checking if plot ${parcela.id} exists:`, checkError)
-                continue
-            }
-
-            // Get or create crop type
-            let cropTypeId = 1 // Default crop type ID
-            const { data: cropType, error: cropTypeError } = await supabase
-                .from("tipos_de_cultivos")
-                .select("id")
-                .eq("nombre", parcela.tipo_cultivo)
-                .single()
-
-            if (cropTypeError) {
-                console.log(`Crop type '${parcela.tipo_cultivo}' not found, creating it`)
-                const { data: newCropType, error: createCropTypeError } = await supabase
-                    .from("tipos_de_cultivos")
-                    .insert([
-                        {
-                            nombre: parcela.tipo_cultivo,
-                        },
-                    ])
-                    .select("id")
-                    .single()
-
-                if (createCropTypeError) {
-                    console.error("Error creating crop type:", createCropTypeError)
-                } else if (newCropType) {
-                    cropTypeId = newCropType.id
-                    console.log(`Created crop type '${parcela.tipo_cultivo}' with ID:`, cropTypeId)
-                }
-            } else if (cropType) {
-                cropTypeId = cropType.id
-            }
-
-            // Get or create sensor
-            let sensorId = 1 // Default sensor ID
-            const { data: sensor, error: sensorError } = await supabase
-                .from("sensores")
-                .select("id")
-                .eq("nombre", `Sensor ${parcela.nombre}`)
-                .single()
-
-            if (sensorError) {
-                console.log(`Sensor for '${parcela.nombre}' not found, creating it`)
-                const { data: newSensor, error: createSensorError } = await supabase
-                    .from("sensores")
-                    .insert([
-                        {
-                            nombre: `Sensor ${parcela.nombre}`,
-                            informacion: parcela.sensor,
-                        },
-                    ])
-                    .select("id")
-                    .single()
-
-                if (createSensorError) {
-                    console.error("Error creating sensor:", createSensorError)
-                } else if (newSensor) {
-                    sensorId = newSensor.id
-                    console.log(`Created sensor for '${parcela.nombre}' with ID:`, sensorId)
-                }
-            } else if (sensor) {
-                sensorId = sensor.id
-
-                // Update sensor information
-                const { error: updateSensorError } = await supabase
-                    .from("sensores")
-                    .update({
-                        informacion: parcela.sensor,
-                    })
-                    .eq("id", sensorId)
-
-                if (updateSensorError) {
-                    console.error("Error updating sensor information:", updateSensorError)
-                } else {
-                    console.log(`Updated sensor information for ID ${sensorId}`)
-                }
-            }
-
-            // Save historical sensor data - save both temperature and humidity
-            const { error: historicalTempError } = await supabase.from("historico_sensores").insert([
-                {
-                    parcela_id: parcela.id,
-                    sensor_id: sensorId,
-                    tipo: "temperatura",
-                    valor: parcela.sensor.temperatura,
-                    timestamp: new Date().toISOString(),
-                },
-            ])
-
-            if (historicalTempError) {
-                console.error("Error saving historical temperature data:", historicalTempError)
-            } else {
-                console.log(`Saved historical temperature data for plot ${parcela.id}`)
-            }
-
-            const { error: historicalHumError } = await supabase.from("historico_sensores").insert([
-                {
-                    parcela_id: parcela.id,
-                    sensor_id: sensorId,
-                    tipo: "humedad",
-                    valor: parcela.sensor.humedad,
-                    timestamp: new Date().toISOString(),
-                },
-            ])
-
-            if (historicalHumError) {
-                console.error("Error saving historical humidity data:", historicalHumError)
-            } else {
-                console.log(`Saved historical humidity data for plot ${parcela.id}`)
-            }
-
-            // Get or create location for this plot
-            let plotLocationId = locationId
-            const { data: plotLocation, error: plotLocationError } = await supabase
-                .from("ubicaciones")
-                .select("id")
-                .eq("nombre", parcela.ubicacion)
-                .single()
-
-            if (plotLocationError) {
-                console.log(`Location '${parcela.ubicacion}' not found, creating it`)
-                const { data: newLocation, error: createLocationError } = await supabase
-                    .from("ubicaciones")
-                    .insert([
-                        {
-                            nombre: parcela.ubicacion,
-                            latitud: 21.0367 + (Math.random() * 0.02 - 0.01), // Random coordinates near Cancun
-                            longitud: -86.8742 + (Math.random() * 0.02 - 0.01),
-                        },
-                    ])
-                    .select("id")
-                    .single()
-
-                if (createLocationError) {
-                    console.error("Error creating location:", createLocationError)
-                } else if (newLocation) {
-                    plotLocationId = newLocation.id
-                    console.log(`Created location '${parcela.ubicacion}' with ID:`, plotLocationId)
-                }
-            } else if (plotLocation) {
-                plotLocationId = plotLocation.id
-            }
-
-            // If plot exists, update it; otherwise, insert it
-            if (existingPlot) {
-                const { error: updateError } = await supabase
-                    .from("informacion")
-                    .update({
-                        nombre: parcela.nombre,
-                        id_ubicacion: plotLocationId,
-                        responsable: parcela.responsable,
-                        id_tipo_cultivo: cropTypeId,
-                        ultimo_riego: parcela.ultimo_riego,
-                        id_sensor: sensorId,
-                    })
-                    .eq("id", parcela.id)
-
-                if (updateError) {
-                    console.error(`Error updating plot ${parcela.id}:`, updateError)
-                } else {
-                    console.log(`Plot ${parcela.id} (${parcela.nombre}) updated successfully.`)
-                }
-            } else {
-                const { error: insertError } = await supabase.from("informacion").insert([
-                    {
-                        id: parcela.id,
-                        nombre: parcela.nombre,
-                        id_ubicacion: plotLocationId,
-                        responsable: parcela.responsable,
-                        id_tipo_cultivo: cropTypeId,
-                        ultimo_riego: parcela.ultimo_riego,
-                        id_sensor: sensorId,
-                    },
-                ])
-
-                if (insertError) {
-                    console.error(`Error inserting plot ${parcela.id}:`, insertError)
-                } else {
-                    console.log(`Plot ${parcela.id} (${parcela.nombre}) inserted successfully.`)
-                }
-            }
-        }
-
-        // 4. Check for deleted plots
-        await checkAndSaveDeletedPlots(apiResponse.parcelas)
-
-        console.log("API data saved to Supabase successfully.")
-    } catch (error) {
-        console.error("Error saving API data to Supabase:", error)
-    }
-}
-
-// Fetch climate data from Supabase
-export const fetchClimateData = async (): Promise<DatabaseTables["datos_clima"]> => {
+// Función para obtener datos del clima
+export const fetchClimateData = async (): Promise<DatosClima[]> => {
     try {
         console.log("Fetching climate data...")
         const { data, error } = await supabase
             .from("datos_clima")
             .select("*")
             .order("fecha_creacion", { ascending: false })
-            .limit(50) // Aumentamos el límite para tener más datos para las gráficas
-
-        if (error) {
-            console.error("Supabase error fetching climate data:", error)
-            throw error
-        }
-
-        console.log("Climate data fetched successfully:", data)
-        return data || []
-    } catch (error) {
-        console.error("Error fetching climate data:", error)
-        return []
-    }
-}
-
-// Fetch historical sensor data
-export const fetchHistoricalSensorData = async (): Promise<HistoricoSensor[]> => {
-    try {
-        console.log("Fetching historical sensor data...")
-        // Use a simpler query that matches your database schema
-        const { data, error } = await supabase
-            .from("historico_sensores")
-            .select(`
-        id,
-        parcela_id,
-        sensor_id,
-        tipo,
-        valor,
-        timestamp
-      `)
-            .order("timestamp", { ascending: false })
             .limit(100)
 
         if (error) {
-            console.error("Supabase error fetching historical sensor data:", error)
-            throw error
-        }
-
-        console.log("Historical sensor data fetched successfully:", data)
-        return data || []
-    } catch (error) {
-        console.error("Error fetching historical sensor data:", error)
-        return []
-    }
-}
-
-// Fetch deleted plots
-export const fetchDeletedPlotsForDashboard = async () => {
-    try {
-        console.log("Fetching deleted plots...")
-        const { data, error } = await supabase
-            .from("parcelas_eliminadas")
-            .select("*")
-            .order("fecha_eliminacion", { ascending: false })
-
-        if (error) {
-            console.error("Supabase error fetching deleted plots:", error)
-            throw error
-        }
-
-        console.log("Deleted plots fetched successfully:", data)
-        return data || []
-    } catch (error) {
-        console.error("Error fetching deleted plots:", error)
-        return []
-    }
-}
-
-// Fetch all plots information
-export const fetchPlotsInformation = async (): Promise<PlotInformation[]> => {
-    try {
-        console.log("Fetching plots information...")
-        const { data, error } = await supabase.from("informacion").select(`
-        *,
-        ubicaciones:id_ubicacion(nombre),
-        tipos_de_cultivos:id_tipo_cultivo(nombre),
-        sensores:id_sensor(*)
-      `)
-
-        if (error) {
-            console.error("Supabase error fetching plots information:", error)
-            throw error
-        }
-
-        console.log("Plots information fetched successfully:", data)
-        return data || []
-    } catch (error) {
-        console.error("Error fetching plots information:", error)
-        return []
-    }
-}
-
-// Función para verificar si parcelas eliminadas han reaparecido en la API
-export const checkForReappearedPlots = async (apiParcelas: Parcela[]): Promise<void> => {
-    try {
-        console.log("Verificando si alguna parcela eliminada ha reaparecido...")
-
-        // Obtener todas las parcelas eliminadas
-        const { data: deletedPlots, error } = await supabase.from("parcelas_eliminadas").select("*")
-
-        if (error) {
-            console.error("Error al obtener parcelas eliminadas:", error)
-            return
-        }
-
-        if (!deletedPlots || deletedPlots.length === 0) {
-            console.log("No hay parcelas eliminadas para verificar")
-            return
-        }
-
-        // Crear un mapa de nombres de parcelas de la API para búsqueda rápida
-        const apiParcelasMap = new Map<string, Parcela>()
-        apiParcelas.forEach((parcela) => {
-            apiParcelasMap.set(parcela.nombre, parcela)
-        })
-
-        // Buscar parcelas eliminadas que hayan reaparecido en la API
-        let reappearedPlotsCount = 0
-
-        for (const deletedPlot of deletedPlots) {
-            // Buscar si hay alguna parcela en la API con el mismo nombre
-            const matchingApiParcela = apiParcelasMap.get(deletedPlot.nombre)
-
-            if (matchingApiParcela) {
-                console.log(`Parcela "${deletedPlot.nombre}" ha reaparecido en la API, eliminando de parcelas_eliminadas`)
-
-                // Eliminar de parcelas_eliminadas
-                const { error: deleteError } = await supabase.from("parcelas_eliminadas").delete().eq("id", deletedPlot.id)
-
-                if (deleteError) {
-                    console.error(`Error al eliminar parcela reaparecida "${deletedPlot.nombre}":`, deleteError)
-                } else {
-                    reappearedPlotsCount++
-                }
-            }
-        }
-
-        if (reappearedPlotsCount > 0) {
-            console.log(`Se encontraron ${reappearedPlotsCount} parcelas que reaparecieron en la API`)
-        } else {
-            console.log("No se encontraron parcelas reaparecidas")
-        }
-    } catch (error) {
-        console.error("Error al verificar parcelas reaparecidas:", error)
-    }
-}
-
-// Función para guardar una parcela en parcelas_eliminadas
-const savePlotToDeletedPlots = async (parcela: Parcela): Promise<boolean> => {
-    try {
-        console.log("Guardando parcela en parcelas_eliminadas:", parcela.nombre)
-
-        // Crear objeto para la tabla parcelas_eliminadas
-        const deletedParcela: Omit<DeletedParcela, "id"> = {
-            nombre: parcela.nombre,
-            ubicacion: parcela.ubicacion,
-            responsable: parcela.responsable,
-            tipo_cultivo: parcela.tipo_cultivo,
-            ultimo_riego: parcela.ultimo_riego,
-            fecha_eliminacion: new Date().toISOString(),
-            sensor_data: JSON.stringify(parcela.sensor),
-        }
-
-        // Guardar en la tabla parcelas_eliminadas
-        const { error: insertError } = await supabase.from("parcelas_eliminadas").insert([deletedParcela])
-
-        if (insertError) {
-            console.error("Error al guardar parcela eliminada:", insertError)
-            throw insertError
-        }
-
-        console.log("Parcela guardada en parcelas_eliminadas:", parcela.nombre)
-        return true
-    } catch (error) {
-        console.error("Error completo al guardar parcela eliminada:", error)
-        return false
-    }
-}
-
-// Función para obtener las parcelas guardadas previamente
-const getPreviouslySavedPlots = async (): Promise<PlotInformation[]> => {
-    try {
-        const { data, error } = await supabase.from("informacion").select("*")
-
-        if (error) {
-            console.error("Error al obtener parcelas guardadas:", error)
+            console.error("Error fetching climate data:", error)
             throw error
         }
 
         return data || []
-    } catch (error) {
-        console.error("Error completo al obtener parcelas guardadas:", error)
+    } catch (err) {
+        console.error("Error in fetchClimateData:", err)
         return []
     }
 }
 
-// Función para verificar y guardar parcelas eliminadas
-export const checkAndSaveDeletedPlots = async (apiParcelas: Parcela[]): Promise<DeletedParcela[]> => {
-    try {
-        console.log("Verificando parcelas eliminadas...")
-
-        // Obtener parcelas guardadas previamente
-        const savedPlots = await getPreviouslySavedPlots()
-
-        if (savedPlots.length === 0) {
-            console.log("No hay parcelas guardadas previamente para comparar")
-            return []
-        }
-
-        // Crear un mapa de IDs de parcelas de la API para búsqueda rápida
-        const apiParcelasIds = new Set(apiParcelas.map((p) => p.id))
-
-        // Encontrar parcelas que ya no están en la API
-        const deletedPlots = savedPlots.filter((plot) => !apiParcelasIds.has(plot.id))
-
-        console.log(`Encontradas ${deletedPlots.length} parcelas eliminadas`)
-
-        // Guardar cada parcela eliminada
-        const savedDeletedPlots: DeletedParcela[] = []
-
-        for (const plot of deletedPlots) {
-            // Obtener información adicional para la parcela
-            const { data: locationData } = await supabase
-                .from("ubicaciones")
-                .select("nombre")
-                .eq("id", plot.id_ubicacion)
-                .single()
-
-            const { data: cropTypeData } = await supabase
-                .from("tipos_de_cultivos")
-                .select("nombre")
-                .eq("id", plot.id_tipo_cultivo)
-                .single()
-
-            const { data: sensorData } = await supabase
-                .from("sensores")
-                .select("informacion")
-                .eq("id", plot.id_sensor)
-                .single()
-
-            // Convertir PlotInformation a Parcela para guardarla
-            const parcela: Parcela = {
-                id: plot.id,
-                nombre: plot.nombre,
-                ubicacion: locationData?.nombre || "Desconocido",
-                responsable: plot.responsable,
-                tipo_cultivo: cropTypeData?.nombre || "Desconocido",
-                ultimo_riego: plot.ultimo_riego,
-                sensor: sensorData?.informacion || {
-                    temperatura: 0,
-                    humedad: 0,
-                },
-            }
-
-            // Verificar si ya existe en parcelas_eliminadas
-            const { data: existingData } = await supabase
-                .from("parcelas_eliminadas")
-                .select("id")
-                .eq("nombre", parcela.nombre)
-                .limit(1)
-
-            if (existingData && existingData.length > 0) {
-                console.log(`Parcela ${parcela.nombre} ya está en parcelas_eliminadas`)
-                continue
-            }
-
-            // Guardar en parcelas_eliminadas
-            const success = await savePlotToDeletedPlots(parcela)
-
-            if (success) {
-                // Obtener la parcela guardada con su ID
-                const { data: newlyDeletedPlot } = await supabase
-                    .from("parcelas_eliminadas")
-                    .select("*")
-                    .eq("nombre", parcela.nombre)
-                    .order("fecha_eliminacion", { ascending: false })
-                    .limit(1)
-                    .single()
-
-                if (newlyDeletedPlot) {
-                    savedDeletedPlots.push(newlyDeletedPlot)
-                }
-            }
-        }
-
-        // Obtener todas las parcelas eliminadas para devolver
-        const { data: allDeletedPlots } = await supabase
-            .from("parcelas_eliminadas")
-            .select("*")
-            .order("fecha_eliminacion", { ascending: false })
-
-        return allDeletedPlots || []
-    } catch (error) {
-        console.error("Error al verificar parcelas eliminadas:", error)
-        return []
-    }
-}
-
-// Fetch deleted plots
+// Función para obtener parcelas eliminadas
 export const fetchDeletedPlots = async (): Promise<DeletedParcela[]> => {
     try {
         console.log("Fetching deleted plots...")
@@ -661,14 +326,35 @@ export const fetchDeletedPlots = async (): Promise<DeletedParcela[]> => {
             .order("fecha_eliminacion", { ascending: false })
 
         if (error) {
-            console.error("Supabase error fetching deleted plots:", error)
+            console.error("Error fetching deleted plots:", error)
             throw error
         }
 
-        console.log("Deleted plots fetched successfully:", data)
         return data || []
-    } catch (error) {
-        console.error("Error fetching deleted plots:", error)
+    } catch (err) {
+        console.error("Error in fetchDeletedPlots:", err)
+        return []
+    }
+}
+
+// Función para obtener parcelas activas
+export const fetchActivePlots = async (): Promise<PlotInformation[]> => {
+    try {
+        console.log("Fetching active plots...")
+        const { data, error } = await supabase
+            .from("parcelas")
+            .select(
+                "*, ubicaciones:id_ubicacion(nombre), tipos_de_cultivos:id_tipo_cultivo(nombre), sensores:id_sensor(id, nombre, informacion)",
+            )
+
+        if (error) {
+            console.error("Error fetching active plots:", error)
+            throw error
+        }
+
+        return data || []
+    } catch (err) {
+        console.error("Error in fetchActivePlots:", err)
         return []
     }
 }
