@@ -1,6 +1,5 @@
 import { createClient } from "@supabase/supabase-js"
 
-// Asegúrate de que estas variables de entorno estén configuradas correctamente
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || "https://lqdievxcicjjdwxirogq.supabase.co"
 const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxxZGlldnhjaWNqamR3eGlyb2dxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI4NDA4MzIsImV4cCI6MjA1ODQxNjgzMn0.9G-sd1sRd_-vf5Sp6ggvkldtTffp3numZHJs1LRLlwk"
 
@@ -42,3 +41,4 @@ export const checkSupabaseConnection = async () => {
     }
 }
 
+    
